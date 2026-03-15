@@ -152,6 +152,69 @@ Most of the changes for *autoISF* are made in oref code of OpenAPS, which is min
 
 Not a lot of support on top of Trio. Tai is for enthusiast willing also to go the extra technical mile, visit [FCL & autoISF Discord](https://discord.gg/KUa8Nf2eeU)
 
+## Fix: Dexcom G6 `created_at` in year 2161 on Nightscout treatments
+
+### Problem
+
+When a Dexcom G6 sensor session is not active (sensor expired, removed, or not yet started), the transmitter reports a sentinel value of `0xFFFFFFFF` (4,294,967,295) for `sessionStartTime`. In `CGMBLEKit/Glucose.swift`, this value is used as a time interval added to the transmitter's `activationDate`:
+
+```swift
+sessionStartDate = activationDate.addingTimeInterval(TimeInterval(timeMessage.sessionStartTime))
+```
+
+Since `0xFFFFFFFF` seconds equals approximately **136 years**, the resulting `sessionStartDate` is projected far into the future (e.g., `2161-11-28`).
+
+This invalid date then propagates through the entire data pipeline:
+
+1. **`G6CGMManager.latestReading.sessionStartDate`** is always updated, even when no valid glucose data is available.
+2. **`PluginSource.swift`** reads `latestReading?.sessionStartDate` and assigns it to every `BloodGlucose` reading.
+3. **`GlucoseStorage.storeCGMState()`** creates a Nightscout "Sensor Start" treatment with `createdAt` set to this far-future date (year 2161).
+4. **Nightscout** receives the treatment with `created_at: "2161-11-28T22:59:07.743Z"`.
+
+The Nightscout **SAGE pill** (Sensor Age) looks for the most recent "Sensor Start" treatment to calculate sensor age. A treatment dated in year 2161 is always the "most recent" one, which permanently corrupts the SAGE display. After the default `DEVICESTATUS_DAYS=2` retention period expires, the device statuses are cleaned up but the corrupted treatment remains, leaving no valid sensor age information.
+
+### Fix
+
+Two layers of validation were added to reject sensor dates that are more than 24 hours in the future:
+
+#### 1. Primary fix in `PluginSource.swift` (line ~234)
+
+After reading sensor dates from the CGM manager and before assigning them to `BloodGlucose` readings, any `sensorStartDate` or `sensorActivatedAt` value more than 24 hours in the future is discarded (set to `nil`):
+
+```swift
+let maxValidDate = Date().addingTimeInterval(24 * 60 * 60)
+if let startDate = sensorStartDate, startDate > maxValidDate {
+    sensorStartDate = nil
+}
+if let activatedAt = sensorActivatedAt, activatedAt > maxValidDate {
+    sensorActivatedAt = nil
+}
+```
+
+This prevents the invalid date from ever reaching the `BloodGlucose` model, stopping it at the source.
+
+#### 2. Defense-in-depth in `GlucoseStorage.swift` (line ~232)
+
+The `storeCGMState()` method, which creates Nightscout "Sensor Start" treatments, now also validates the date before creating a treatment:
+
+```swift
+guard let sessionStartDate = x.sessionStartDate,
+      sessionStartDate <= Date().addingTimeInterval(24 * 60 * 60) else { continue }
+```
+
+This ensures that even if an invalid date somehow bypasses the first check, it will never be written as a Nightscout treatment.
+
+### Files modified
+
+| File | Change |
+|------|--------|
+| `Trio/Sources/APS/CGM/PluginSource.swift` | Added future-date validation for `sensorStartDate` and `sensorActivatedAt` |
+| `Trio/Sources/APS/Storage/GlucoseStorage.swift` | Extended `guard` to reject `sessionStartDate` more than 24h in the future |
+
+### Why 24 hours?
+
+A 24-hour tolerance is used instead of a strict "now" cutoff to account for minor clock skew between the phone and the CGM transmitter. The sentinel value of `0xFFFFFFFF` produces dates ~136 years in the future, so a 24-hour window is more than sufficient to distinguish legitimate dates from invalid ones while avoiding false positives.
+
 ## Trio Documentation
 
 ... can be found in the original [READ.me for Trio](https://github.com/nightscout/Trio/blob/main/README.md)
