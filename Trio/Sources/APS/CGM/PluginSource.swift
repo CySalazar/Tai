@@ -231,6 +231,15 @@ extension PluginSource: CGMManagerDelegate {
                 sensorTransmitterID = cgmTransmitterManager.sensorName
             }
 
+            // Discard invalid sensor dates (e.g. Dexcom G6 reports sessionStartTime=0xFFFFFFFF when no session is active)
+            let maxValidDate = Date().addingTimeInterval(24 * 60 * 60)
+            if let startDate = sensorStartDate, startDate > maxValidDate {
+                sensorStartDate = nil
+            }
+            if let activatedAt = sensorActivatedAt, activatedAt > maxValidDate {
+                sensorActivatedAt = nil
+            }
+
             let bloodGlucose = values.compactMap { newGlucoseSample -> BloodGlucose? in
                 let quantity = newGlucoseSample.quantity
 

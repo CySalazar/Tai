@@ -229,7 +229,8 @@ final class BaseGlucoseStorage: GlucoseStorage, Injectable {
             var updated = false
 
             for x in glucose {
-                guard let sessionStartDate = x.sessionStartDate else { continue }
+                guard let sessionStartDate = x.sessionStartDate,
+                      sessionStartDate <= Date().addingTimeInterval(24 * 60 * 60) else { continue }
 
                 // Skip if we already have a recent treatment
                 if let lastTreatment = treatments.last,
